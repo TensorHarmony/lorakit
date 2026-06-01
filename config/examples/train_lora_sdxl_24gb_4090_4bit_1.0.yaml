@@ -1,0 +1,102 @@
+---
+# 4-bit QLoRA SDXL LoRA setup. The base UNet is loaded in 4-bit NF4 while the
+# LoRA adapters train in bf16. Uses less VRAM than a bf16 base, at the cost of
+# some per-step dequantization overhead.
+#
+# On a 24GB card the bf16 "metal" config is faster; prefer 4-bit when you are
+# VRAM-limited. bitsandbytes is installed by default (`uv sync`).
+#
+# To use this: copy it, then set `name`, `instant_prompt`/`class_prompt`, and
+# `dataset_folder` to your own values.
+job: train
+version: "1.0" # increment this when you want to start a fresh run
+name: "my_model_name" # names the output folder and weights file
+output_folder: "output" # root folder for sessions/samples/weights
+config:
+  logging_folder: "logs"
+  device: "cuda:0"
+  allow_tf32: true # TF32 matmuls on Ampere/Ada (faster)
+  matmul_precision: "high" # highest | high | medium
+  cudnn_benchmark: true
+  instant_prompt: "SKS" # trigger token for your subject
+  class_prompt: "man" # the subject's class
+  train:
+    dataset_folder: "/path/to/images/folder" # absolute path to a folder of images
+    #resume_from_checkpoint: "latest" # resume from a checkpoint folder, or "latest"
+    batch_size: 1
+    max_train_steps: 2000
+    save_every: 200 # save a checkpoint every N steps
+    checkpoints_total_limit: 8 # keep at most this many checkpoints
+    max_grad_norm: 1.0
+    gradient_accumulation_steps: 1
+    #with_prior_preservation: true # currently not working (bug)
+    #snr_gamma: 5.0
+    #do_edm_style_training: true
+    seed: 42
+    dtype: bf16 # bf16 | fp16 | fp32
+    gradient_checkpointing: false # off: ~2x faster backward; set true if you hit OOM
+    cache_latents: true # pre-encode images once, skip the per-step fp32 VAE
+    train_text_encoder: false # also train the CLIP text encoders
+    resolution: 1024
+    num_workers: 4
+    loss_decay: 0.995 # EMA factor for the displayed loss
+    #skip_pre_train_sample: true # skip the sample generated before training starts
+    #disable_sampling: true # disable sample generation entirely
+    optimizer: "adamw" # adamw | adamw8bit | adamwschedulefree | prodigy
+    optimizer_params:
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.02
+      eps: 0.00000001
+    lora: # UNet LoRA (diffusers attention naming)
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "to_k"
+        - "to_q"
+        - "to_v"
+        - "to_out.0"
+    text_encoder_lora: # only used when train_text_encoder: true (CLIP naming)
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "q_proj"
+        - "k_proj"
+        - "v_proj"
+        - "out_proj"
+    lr_scheduler: "constant"
+    lr_scheduler_params:
+      num_warmup_steps: 0
+      num_training_steps: 1000
+      num_cycles: 1
+      power: 1
+  model:
+    name_or_path: "stabilityai/stable-diffusion-xl-base-1.0" # HF repo or local folder
+    #variant: "fp16" # only if every component ships *.fp16 files; base SDXL does not
+    # 4-bit NF4 base model quantization (true QLoRA). 4-bit is the recommended
+    # quantization mode for *training*: it uses less memory than 8-bit and, unlike
+    # the inference-oriented 8-bit LLM.int8() path, preserves the gradient signal to
+    # the LoRA adapters so the model learns at the usual learning rate.
+    quantization:
+      bits: 4 # 4 (NF4 QLoRA, recommended for training) or 8 (LLM.int8, better for inference)
+      quantize_text_encoder: false # also quantize the two text encoders
+      bnb_4bit_quant_type: "nf4" # "nf4" or "fp4"
+      bnb_4bit_use_double_quant: true # extra memory savings
+  sample:
+    sample_every: 200 # generate preview images every N steps
+    prompts:
+      - "portrait photo of sks man, natural light, sharp focus, 50mm, highly detailed"
+      - "sks man wearing a tailored navy suit, studio headshot, soft lighting, bokeh background"
+      - "sks man hiking in the mountains at sunset, candid photo, cinematic, golden hour"
+    neg:
+      - "painting, illustration, cartoon, blurry, low quality"
+      - "drawing, sketch, deformed, extra fingers, watermark"
+      - "3d render, cgi, plastic skin, overexposed, distorted face"
+    seed: 42
+    walk_seed: true
+    guidance_scale: 7
+    sample_steps: 20

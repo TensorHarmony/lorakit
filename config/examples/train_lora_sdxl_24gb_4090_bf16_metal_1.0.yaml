@@ -1,0 +1,103 @@
+---
+# Fastest SDXL LoRA setup for a 24GB GPU (e.g. RTX 4090).
+# ~5.9x faster steps than a naive 4-bit setup in our profiling (~227 vs ~1334 ms/step).
+#
+# Why it's fast:
+#   * NO quantization -> a native bf16 base avoids per-step bitsandbytes
+#     dequantization overhead. Peak VRAM is ~15-17GB, which fits a 24GB card.
+#   * gradient_checkpointing: false -> ~2x faster backward (we have the VRAM).
+#   * cache_latents: true           -> the VAE runs once, not every step.
+#   * torch_compile: true           -> TorchInductor-compiled UNet.
+#
+# torch.compile needs Triton, which is installed by default (`uv sync`). The first
+# step pays a one-time compile cost (~1-3 min); set torch_compile: false to skip it.
+#
+# To use this: copy it, then set `name`, `instant_prompt`/`class_prompt`, and
+# `dataset_folder` to your own values.
+job: train
+version: "1.0" # increment this when you want to start a fresh run
+name: "my_model_name" # names the output folder and weights file
+output_folder: "output" # root folder for sessions/samples/weights
+config:
+  logging_folder: "logs"
+  device: "cuda:0"
+  allow_tf32: true # TF32 matmuls on Ampere/Ada (faster)
+  matmul_precision: "high" # highest | high | medium
+  cudnn_benchmark: true
+  instant_prompt: "SKS" # trigger token for your subject
+  class_prompt: "man" # the subject's class
+  train:
+    dataset_folder: "/path/to/images/folder" # absolute path to a folder of images
+    #resume_from_checkpoint: "latest" # resume from a checkpoint folder, or "latest"
+    batch_size: 1
+    max_train_steps: 2000
+    save_every: 200 # save a checkpoint every N steps
+    checkpoints_total_limit: 8 # keep at most this many checkpoints
+    max_grad_norm: 1.0
+    gradient_accumulation_steps: 1
+    seed: 42
+    dtype: bf16 # bf16 | fp16 | fp32
+    gradient_checkpointing: false # off: ~2x faster backward; set true if you hit OOM
+    cache_latents: true # pre-encode images once, skip the per-step fp32 VAE
+    channels_last: false # measured slower for SDXL LoRA; leave off
+    torch_compile: true # TorchInductor-compiled UNet (needs Triton, installed by default)
+    torch_compile_mode: "default" # "default" | "reduce-overhead" | "max-autotune"
+    train_text_encoder: false # also train the CLIP text encoders
+    resolution: 1024
+    num_workers: 4
+    loss_decay: 0.995 # EMA factor for the displayed loss
+    #skip_pre_train_sample: true # skip the sample generated before training starts
+    #disable_sampling: true # disable sample generation entirely
+    # Optional per-section training-loop profiler (default off):
+    #profile:
+    #  enabled: true
+    #  warmup: 5 # steps excluded from the averages
+    #  report_every: 0 # 0 = only print the summary at the end
+    optimizer: "adamw" # adamw | adamw8bit | adamwschedulefree | prodigy
+    optimizer_params:
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.02
+      eps: 0.00000001
+    lora: # UNet LoRA (diffusers attention naming)
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "to_k"
+        - "to_q"
+        - "to_v"
+        - "to_out.0"
+    text_encoder_lora: # only used when train_text_encoder: true (CLIP naming)
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "q_proj"
+        - "k_proj"
+        - "v_proj"
+        - "out_proj"
+    lr_scheduler: "constant"
+    lr_scheduler_params:
+      num_warmup_steps: 0
+      num_training_steps: 1000
+      num_cycles: 1
+      power: 1
+  model:
+    name_or_path: "stabilityai/stable-diffusion-xl-base-1.0" # HF repo or local folder
+  sample:
+    sample_every: 200 # generate preview images every N steps
+    prompts:
+      - "portrait photo of sks man, natural light, sharp focus, 50mm, highly detailed"
+      - "sks man wearing a tailored navy suit, studio headshot, soft lighting, bokeh background"
+      - "sks man hiking in the mountains at sunset, candid photo, cinematic, golden hour"
+    neg:
+      - "painting, illustration, cartoon, blurry, low quality"
+      - "drawing, sketch, deformed, extra fingers, watermark"
+      - "3d render, cgi, plastic skin, overexposed, distorted face"
+    seed: 42
+    walk_seed: true
+    guidance_scale: 7
+    sample_steps: 20

@@ -59,7 +59,7 @@ D:/datasets/my_subject/
 
 Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`. Images are auto-resized and cropped to the training `resolution` (default 1024). No captions or subfolders needed.
 
-**2. Copy and edit a config.** Start from one of the [provided configs](#choosing-a-config) and change at least:
+**2. Copy and edit a config.** Pick one of the [example configs](#choosing-a-config), copy it out of `config/examples/`, and change at least:
 
 ```yaml
 name: "my_subject"                          # names your output folder + weights
@@ -70,10 +70,17 @@ config:
     dataset_folder: "D:/datasets/my_subject" # absolute path to your images
 ```
 
+```bash
+cp config/examples/train_lora_sdxl_24gb_4090_bf16_metal_1.0.yaml config/my_run.yaml
+# edit config/my_run.yaml
+```
+
+> Anything you put directly in `config/` (other than `config/examples/`) is gitignored, so your personal run configs with local paths won't be committed.
+
 **3. Train.**
 
 ```bash
-uv run lorakit config/train_lora_sdxl_24gb_4090_bf16_metal_1.0.yaml
+uv run lorakit config/my_run.yaml
 ```
 
 When it finishes, your LoRA is at `output/<name>_<version>/pytorch_lora_weights.safetensors`.
@@ -82,12 +89,14 @@ When it finishes, your LoRA is at `output/<name>_<version>/pytorch_lora_weights.
 
 ## Choosing a config
 
-| Config | GPU | Speed | Notes |
+All examples live in `config/examples/`. Copy one into `config/` and edit it.
+
+| Example config | GPU | Speed | Notes |
 |---|---|---|---|
-| `config/train_lora_sdxl_24gb_4090_bf16_metal_1.0.yaml` | 24 GB | **Fastest** | bf16 base + `torch.compile` + latent caching. Recommended on a 4090. |
-| `config/train_lora_sdxl_24gb_4090_4bit_1.0.yaml` | 24 GB | Fast | 4-bit QLoRA base. Lower VRAM, slightly slower than bf16. |
-| `config/examples/train_lora_sdxl_24gb_4090_1.0.yaml` | 24 GB | — | Fully-commented reference of every option. |
-| `config/examples/train_lora_sdxl_16gb_t4_1.0.yaml` | 16 GB | — | Low-VRAM (e.g. T4) using 4-bit quantization. |
+| `train_lora_sdxl_24gb_4090_bf16_metal_1.0.yaml` | 24 GB | **Fastest** | bf16 base + `torch.compile` + latent caching. Recommended on a 4090. |
+| `train_lora_sdxl_24gb_4090_4bit_1.0.yaml` | 24 GB | Fast | 4-bit QLoRA base. Lower VRAM, slightly slower than bf16. |
+| `train_lora_sdxl_24gb_4090_1.0.yaml` | 24 GB | — | Fully-commented reference of every option. |
+| `train_lora_sdxl_16gb_t4_1.0.yaml` | 16 GB | — | Low-VRAM (e.g. T4) using 4-bit quantization. |
 
 Not sure? On a 24 GB card use the **bf16 metal** config. On 16 GB, use the **T4** config.
 
