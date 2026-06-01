@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lorakit"
+version = "0.1.0"
+description = "A simple SDXL fine-tuning toolkit based on AutoTrain Advanced"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Omid Sakhi", email = "omid.sakhi@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "pyyaml",
+    "accelerate",
+    "transformers",
+    "diffusers",
+    "peft",
+    # 8-bit/4-bit base model quantization (QLoRA-style training) and AdamW8bit.
+    "bitsandbytes",
+    # Triton backend for `torch_compile: true` (TorchInductor). On Linux, Triton
+    # ships with torch; on Windows it must be installed separately, so we only
+    # require the Windows wheel here.
+    "triton-windows; platform_system == 'Windows'",
+]
+
+[dependency-groups]
+dev = ["ruff", "vulture"]
+
+[project.scripts]
+lorakit = "lorakit.cli.lorakit:main"
+
+[project.urls]
+Homepage = "https://github.com/omidsakhi/lorakit"
+Repository = "https://github.com/omidsakhi/lorakit"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lorakit"]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.vulture]
+paths = ["src/lorakit"]
+min_confidence = 100

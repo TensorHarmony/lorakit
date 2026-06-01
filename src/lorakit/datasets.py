@@ -1,13 +1,14 @@
 import itertools
-from pathlib import Path
-from torch.utils.data import Dataset
-from torchvision.transforms.functional import crop
-import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
 import random
+from pathlib import Path
+
+import torch
+from PIL import Image
 from PIL.ImageOps import exif_transpose
+from torch.utils.data import Dataset
+from torchvision import transforms
+from torchvision.transforms.functional import crop
+
 
 class DreamBoothDataset(Dataset):
     """
@@ -38,9 +39,38 @@ class DreamBoothDataset(Dataset):
 
         self.instance_data_root = Path(dataset_folder)
         if not self.instance_data_root.exists():
-            raise ValueError("Instance images root doesn't exists.")
+            raise ValueError(
+                f"Instance images root '{self.instance_data_root.resolve()}' does not exist. "
+                f"Set 'dataset_folder' in your config to the absolute path of the folder that "
+                f"directly contains your training images."
+            )
+        if not self.instance_data_root.is_dir():
+            raise ValueError(
+                f"Instance images root '{self.instance_data_root.resolve()}' is not a directory. "
+                f"Set 'dataset_folder' to a folder containing images, not a file."
+            )
 
-        instance_images = [Image.open(path) for path in Path(dataset_folder).iterdir() if path.suffix.lower() in ('.png', '.jpg')]
+        supported_extensions = (".png", ".jpg", ".jpeg", ".webp")
+        image_paths = sorted(
+            path
+            for path in self.instance_data_root.iterdir()
+            if path.suffix.lower() in supported_extensions
+        )
+        if not image_paths:
+            found = sorted(
+                {p.suffix.lower() for p in self.instance_data_root.iterdir() if p.is_file()}
+            )
+            raise ValueError(
+                f"No training images found in '{self.instance_data_root.resolve()}'. "
+                f"Supported extensions are {supported_extensions}. "
+                f"Make sure images are placed directly in this folder (not in subfolders)."
+                + (
+                    f" Files with these extensions were found and ignored: {found}."
+                    if found
+                    else ""
+                )
+            )
+        instance_images = [Image.open(path) for path in image_paths]
         self.custom_instance_prompts = None
 
         self.instance_images = []
@@ -51,8 +81,12 @@ class DreamBoothDataset(Dataset):
         self.original_sizes = []
         self.crop_top_lefts = []
         self.pixel_values = []
-        train_resize = transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR)
-        train_crop = transforms.CenterCrop(resolution) if center_crop else transforms.RandomCrop(resolution)
+        train_resize = transforms.Resize(
+            resolution, interpolation=transforms.InterpolationMode.BILINEAR
+        )
+        train_crop = (
+            transforms.CenterCrop(resolution) if center_crop else transforms.RandomCrop(resolution)
+        )
         train_flip = transforms.RandomHorizontalFlip(p=1.0)
         train_transforms = transforms.Compose(
             [
@@ -99,7 +133,9 @@ class DreamBoothDataset(Dataset):
         self.image_transforms = transforms.Compose(
             [
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution) if center_crop else transforms.RandomCrop(resolution),
+                transforms.CenterCrop(resolution)
+                if center_crop
+                else transforms.RandomCrop(resolution),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
@@ -116,6 +152,7 @@ class DreamBoothDataset(Dataset):
         example["instance_images"] = instance_image
         example["original_size"] = original_size
         example["crop_top_left"] = crop_top_left
+        example["index"] = index % self.num_instance_images
 
         if self.custom_instance_prompts:
             caption = self.custom_instance_prompts[index % self.num_instance_images]
@@ -144,6 +181,7 @@ def collate_fn(examples, with_prior_preservation=False):
     prompts = [example["instance_prompt"] for example in examples]
     original_sizes = [example["original_size"] for example in examples]
     crop_top_lefts = [example["crop_top_left"] for example in examples]
+    indices = [example["index"] for example in examples]
 
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
@@ -161,5 +199,6 @@ def collate_fn(examples, with_prior_preservation=False):
         "prompts": prompts,
         "original_sizes": original_sizes,
         "crop_top_lefts": crop_top_lefts,
+        "indices": indices,
     }
     return batch

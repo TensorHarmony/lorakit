@@ -1,8 +1,10 @@
-from typing import Callable
+from collections.abc import Callable
+
 
 class BaseCallback:
     def __init__(self):
         pass
+
 
 class ProgressCallback(BaseCallback):
     def __init__(self, progress_function: Callable[[float], None]):
@@ -13,6 +15,7 @@ class ProgressCallback(BaseCallback):
             raise ValueError("Progress value must be a float")
         normalized_value = max(0.0, min(1.0, value))
         self._progress_function(normalized_value)
+
 
 class LossCallback(BaseCallback):
     def __init__(self, loss_function: Callable[[float], float]):

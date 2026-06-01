@@ -27,11 +27,21 @@ config:
     dtype: bf16 # data type
     #gradient_checkpointing: true
     train_text_encoder: false # train text encoder
+    cache_latents: true # pre-encode images once and skip the per-step VAE forward (faster; disable if you use train_text_encoder with changing crops)
+    #channels_last: false # 4D conv memory layout; measured slower for SDXL LoRA, leave off
+    #torch_compile: false # TorchInductor-compiled UNet; big speedup on a non-quantized bf16 base (Triton is installed by default). Avoid combining with 4-bit quantization.
+    #torch_compile_mode: "default" # "default" | "reduce-overhead" | "max-autotune"
     resolution: 1024 # resolution
     num_workers: 4 # number of workers
     loss_decay: 0.995
     #skip_pre_train_sample: true
     #disable_sampling: true
+    # Optional per-section training-loop profiler (default off). Prints a
+    # ms/step breakdown (vae encode, unet forward, backward, optimizer, ...).
+    #profile:
+    #  enabled: true
+    #  warmup: 5 # steps excluded from the averages
+    #  report_every: 0 # 0 = only print the summary at the end
     optimizer: "adamw" # 'adamw', 'adamw8bit' 'adamwschedulefree', 'prodigy'
     optimizer_params:
       lr: 0.0001 # learning rate
@@ -66,7 +76,14 @@ config:
       power: 1
   model:
     name_or_path: "stabilityai/stable-diffusion-xl-base-1.0" # huggingface repo name or path to local folder
-    variant: "fp16"
+    #variant: "fp16" # only set this if every component (incl. tokenizer/scheduler) ships *.fp16 files; base SDXL does not
+    # Optional 8-bit/4-bit base model quantization (QLoRA-style). bitsandbytes
+    # is installed by default.
+    #quantization:
+    #  bits: 8 # 8 or 4
+    #  quantize_text_encoder: false # also quantize the two text encoders
+    #  bnb_4bit_quant_type: "nf4" # only used when bits is 4: "nf4" or "fp4"
+    #  bnb_4bit_use_double_quant: true # only used when bits is 4
   sample:
     sample_every: 200 # sample every this many steps
     prompts:

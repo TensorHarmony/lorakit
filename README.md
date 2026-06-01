@@ -1,70 +1,229 @@
 # lorakit
 
-A simple SDXL fine-tuning toolkit based on the DreamBooth branch of AutoTrain Advanced from 🤗, inspired by the way ai-toolkit approaches configuration.
+**Fine-tune Stable Diffusion XL (SDXL) with LoRA from a single YAML file.**
 
-## Overview
+lorakit is a small, fast, config-driven toolkit for SDXL DreamBooth / LoRA training. Point it at a folder of images, edit one YAML file, and run a single command. It's built on the DreamBooth training code from Hugging Face's [AutoTrain Advanced](https://github.com/huggingface/autotrain-advanced) and takes its configuration style from [ai-toolkit](https://github.com/ostris/ai-toolkit).
 
-lorakit is a flexible toolkit for fine-tuning Stable Diffusion XL (SDXL) models using the DreamBooth technique. It leverages the capabilities of AutoTrain Advanced and provides an easy-to-use configuration-based approach for customizing your training process. Additionally, lorakit supports quick experimentation for research purposes, allowing users to rapidly iterate on ideas and test different configurations with minimal setup.
+> Used in production by [FaceHarmony.ai](https://faceharmony.ai).
 
-## Features
+---
 
-- SDXL fine-tuning using DreamBooth
-- LoRA (Low-Rank Adaptation) support for unet and text encoder
-- Configurable training parameters
-- Support for various optimizers (AdamW, AdamW8bit, AdamWScheduleFree, Prodigy)
-- Customizable learning rate schedulers
-- Gradient checkpointing and accumulation
-- Mixed precision training (fp16, bf16, fp32)
-- Resumable training from checkpoints
-- Sample generation during training
+## Highlights
 
-## ToDo
+- **One command, one config file** — no code required.
+- **Fast** — latent caching, optional `torch.compile`, and bf16 training reach **~5.9x faster steps** than a naive 4-bit setup on a 24 GB RTX 4090 (see [Performance](#performance)).
+- **Fits your GPU** — train on 24 GB in bf16, or drop to **4-bit QLoRA** to fit 16 GB cards.
+- **Live previews** — generates sample images during training so you can watch progress.
+- **Resumable** — checkpoints let you stop and continue.
+- Flexible optimizers (AdamW, AdamW8bit, AdamWScheduleFree, Prodigy), LR schedulers, and LoRA targets for both the UNet and text encoders.
 
-- [ ] Prior preservation option
-- [ ] EMA (Exponential Moving Average) support
-- [ ] Quantization
-- [ ] Getting rid of "Loading pipeline components..."
-- [ ] Integrating FLUX.1
+---
+
+## Requirements
+
+- An NVIDIA GPU (16 GB+ recommended; 24 GB for the fastest bf16 path).
+- [uv](https://docs.astral.sh/uv/) for dependency management.
+- PyTorch wheels are resolved from the [CUDA 12.6 index](https://download.pytorch.org/whl/cu126) automatically.
 
 ## Installation
 
-```
-git clone https://github.com/omidsakhi/lorakit.git lorakit
+```bash
+git clone https://github.com/omidsakhi/lorakit.git
 cd lorakit
-python -m venv .venv
-source .venv/bin/activate # or .venv/Scripts/activate on Windows
-pip install .
+uv sync
 ```
 
-## Usage
+That's it — `bitsandbytes` (quantization) and Triton (for `torch.compile`) are installed by default, so quantization and compilation work out of the box.
 
-1. Prepare your dataset and configuration file.
-2. Run the training process using the `lorakit` command-line tool:
+Run everything with `uv run lorakit ...`, or activate the venv first:
+
+```bash
+# Linux / macOS
+source .venv/bin/activate
+# Windows (PowerShell)
+.venv\Scripts\activate
+```
+
+---
+
+## Quickstart
+
+**1. Gather your images.** Put 10–30 images of your subject in a folder:
 
 ```
-lorakit examples/train_lora_sdxl_24gb_1.0.yaml
+D:/datasets/my_subject/
+├── img01.jpg
+├── img02.png
+└── ...
 ```
 
-## Configuration
+Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`. Images are auto-resized and cropped to the training `resolution` (default 1024). No captions or subfolders needed.
 
-lorakit uses YAML configuration files for easy customization of the training process. Find an example configuration file in the `examples` directory.
+**2. Copy and edit a config.** Start from one of the [provided configs](#choosing-a-config) and change at least:
 
-## Real-World Applications
+```yaml
+name: "my_subject"                          # names your output folder + weights
+instant_prompt: "SKS"                       # the trigger token for your subject
+class_prompt: "man"                         # the subject's class
+config:
+  train:
+    dataset_folder: "D:/datasets/my_subject" # absolute path to your images
+```
 
-lorakit has been successfully used in production environments, including the [FaceHarmony.ai](https://faceharmony.ai) app, demonstrating its reliability and effectiveness in real-world AI applications.
+**3. Train.**
+
+```bash
+uv run lorakit config/train_lora_sdxl_24gb_4090_bf16_metal_1.0.yaml
+```
+
+When it finishes, your LoRA is at `output/<name>_<version>/pytorch_lora_weights.safetensors`.
+
+---
+
+## Choosing a config
+
+| Config | GPU | Speed | Notes |
+|---|---|---|---|
+| `config/train_lora_sdxl_24gb_4090_bf16_metal_1.0.yaml` | 24 GB | **Fastest** | bf16 base + `torch.compile` + latent caching. Recommended on a 4090. |
+| `config/train_lora_sdxl_24gb_4090_4bit_1.0.yaml` | 24 GB | Fast | 4-bit QLoRA base. Lower VRAM, slightly slower than bf16. |
+| `config/examples/train_lora_sdxl_24gb_4090_1.0.yaml` | 24 GB | — | Fully-commented reference of every option. |
+| `config/examples/train_lora_sdxl_16gb_t4_1.0.yaml` | 16 GB | — | Low-VRAM (e.g. T4) using 4-bit quantization. |
+
+Not sure? On a 24 GB card use the **bf16 metal** config. On 16 GB, use the **T4** config.
+
+---
+
+## Using your trained LoRA
+
+The output is a standard diffusers LoRA, so you can load it into any SDXL pipeline:
+
+```python
+from diffusers import StableDiffusionXLPipeline
+import torch
+
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.bfloat16
+).to("cuda")
+pipe.load_lora_weights("output/my_subject_1.0/pytorch_lora_weights.safetensors")
+
+image = pipe("portrait photo of SKS man, natural light, 50mm", num_inference_steps=25).images[0]
+image.save("result.jpg")
+```
+
+(Use your own `instant_prompt` trigger token in the prompt.)
+
+### What lands in `output/`
+
+```
+output/<name>_<version>/
+├── pytorch_lora_weights.safetensors          # final LoRA
+├── config.yaml                               # the exact config used
+├── samples/                                  # preview images during training
+├── logs/                                     # training logs
+└── checkpoint_<name>_<version>_<step>/       # resumable checkpoints
+```
+
+---
+
+## Performance
+
+lorakit caches VAE latents once at startup (skipping the per-step VAE pass) and lets you toggle a few high-impact knobs. Measured on an RTX 4090 at 1024px, batch size 1:
+
+| Setup | ms / step | Speedup |
+|---|--:|--:|
+| 4-bit baseline (gradient checkpointing on, no caching) | ~1334 | 1.0x |
+| 4-bit + latent caching + gradient checkpointing off | ~423 | 3.2x |
+| bf16 base (no quantization) | ~288 | 4.6x |
+| **bf16 + `torch.compile`** | **~227** | **5.9x** |
+
+Tuning knobs (under `train:`):
+
+```yaml
+gradient_checkpointing: false  # off = ~2x faster backward; on = lower VRAM
+cache_latents: true            # encode images once, not every step
+torch_compile: true            # TorchInductor-compiled UNet (bf16 base)
+torch_compile_mode: "default"  # "default" | "reduce-overhead" | "max-autotune"
+```
+
+Tips:
+- **On a 24 GB card, prefer a bf16 base over 4-bit** — 4-bit saves memory but adds per-step dequantization overhead. Use 4-bit only when you're VRAM-limited.
+- `torch.compile` pays a one-time compilation cost on the first step (~1–3 min), then runs faster for the rest of training. Avoid combining it with 4-bit quantization.
+- If you hit out-of-memory, set `gradient_checkpointing: true`.
+
+---
+
+## Quantization (QLoRA)
+
+lorakit can load the base SDXL model in 8-bit or 4-bit precision via [bitsandbytes](https://github.com/bitsandbytes-foundation/bitsandbytes) while training the LoRA adapters in higher precision (QLoRA-style). This is what makes 16 GB training possible. Enable it in the `model` section:
+
+```yaml
+model:
+  name_or_path: "stabilityai/stable-diffusion-xl-base-1.0"
+  quantization:
+    bits: 4                        # 4 (recommended for training) or 8
+    quantize_text_encoder: false   # also quantize the two CLIP text encoders
+    bnb_4bit_quant_type: "nf4"     # "nf4" or "fp4" (4-bit only)
+    bnb_4bit_use_double_quant: true
+```
+
+- **Use `bits: 4` for training.** 4-bit NF4 (true QLoRA) computes matmuls in your fp16/bf16 `dtype`, preserving the gradient signal to the LoRA adapters so they learn at the normal learning rate — and it uses *less* memory than 8-bit.
+- `bits: 8` uses LLM.int8(), which is tuned for **inference**; its backward pass attenuates gradients, so LoRA learns more slowly. Prefer it only when 4-bit isn't an option.
+- The VAE is always kept in fp32 (never quantized) to avoid NaN losses.
+
+---
+
+## Resuming training
+
+Point `resume_from_checkpoint` at a saved checkpoint folder (or `"latest"`):
+
+```yaml
+config:
+  train:
+    resume_from_checkpoint: "latest"
+```
+
+---
+
+## Profiling (optional)
+
+To see a per-section `ms/step` breakdown of the training loop (data loading, VAE, UNet forward, backward, optimizer), enable the built-in profiler:
+
+```yaml
+config:
+  train:
+    profile:
+      enabled: true
+      warmup: 5        # steps excluded from the averages
+      report_every: 0  # 0 = print summary only at the end
+```
+
+Ready-made profiling configs live in `config/examples/profile_4bit.yaml` and `config/examples/profile_bf16.yaml`.
+
+---
+
+## Troubleshooting
+
+- **`No training images found`** — `dataset_folder` must point directly at a folder containing images (not subfolders), using an absolute path.
+- **Out of memory** — set `gradient_checkpointing: true`, switch to a 4-bit config, or lower `resolution`.
+- **`Cannot find a working triton installation`** — run `uv sync` (Triton is a declared dependency); avoid running with a stale/hand-modified environment. `torch.compile` requires it.
+- **Quantization import errors** — run `uv sync` to (re)install `bitsandbytes`.
+
+---
+
+## Roadmap
+
+- [ ] Prior preservation option
+- [ ] EMA (Exponential Moving Average) support
+- [ ] FLUX.1 integration
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome — please open an issue or pull request.
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-This project is based on the DreamBooth branch of AutoTrain Advanced from Hugging Face 🤗. We appreciate their contributions to the open-source community and special thank to Abhishek Thakur for his amazing work on AutoTrain Advanced.
-
-## Keywords
-
-LoRA, SDXL fine-tuning, DreamBooth, AI art generation, text-to-image models, Stable Diffusion XL, machine learning, deep learning, neural networks, transfer learning, low-rank adaptation, diffusion models, generative AI, PyTorch, Hugging Face, AI research, automation toolkit, fine-tuning techniques, AutoTrain Advanced
+Built on the DreamBooth branch of [AutoTrain Advanced](https://github.com/huggingface/autotrain-advanced) from Hugging Face. Special thanks to Abhishek Thakur for his work on AutoTrain Advanced.

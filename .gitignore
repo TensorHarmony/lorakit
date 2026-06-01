@@ -1,8 +1,17 @@
 __pycache__/
 output/
 build/
+.venv/
 venv/
 *.pyc
-*.yaml
 *.json
 *.egg-info/
+
+# Runtime YAML copies (e.g. saved training config under output/)
+output/**/*.yaml
+
+# Ignore local presets at config/*.yaml; track reference configs under config/examples/
+# (Git cannot re-include files under an ignored directory — un-ignore each level explicitly.)
+config/*
+!config/examples/
+!config/examples/**

@@ -1,0 +1,90 @@
+---
+# Short profiling config: identical model/quantization setup to a 4-bit SDXL
+# training run, but with a low step count and sampling/checkpointing disabled
+# so the run measures only the training loop.
+# Enable the per-section profiler with:  $env:LORAKIT_PROFILE=1
+job: train
+version: "prof"
+name: "profile"
+output_folder: "output"
+config:
+  logging_folder: "logs"
+  device: "cuda:0"
+  allow_tf32: true
+  matmul_precision: "high"
+  cudnn_benchmark: true
+  instant_prompt: "SKS"
+  class_prompt: "man"
+  train:
+    dataset_folder: "/path/to/images/folder"
+    batch_size: 1
+    max_train_steps: 30
+    save_every: 0
+    checkpoints_total_limit: 8
+    max_grad_norm: 1.0
+    gradient_accumulation_steps: 1
+    seed: 42
+    dtype: bf16
+    gradient_checkpointing: false # disabled: VRAM headroom on 24GB, faster backward
+    cache_latents: true # pre-encode images once, skip VAE in the hot loop
+    channels_last: false
+    torch_compile: false
+    train_text_encoder: false
+    resolution: 1024
+    num_workers: 4
+    loss_decay: 0.995
+    skip_pre_train_sample: true
+    disable_sampling: true
+    profile:
+      enabled: true # per-section training-loop profiler (default false)
+      warmup: 5 # steps excluded from the averages (cuDNN autotune, etc.)
+      report_every: 0 # 0 = only print the summary at the end
+    optimizer: "adamw"
+    optimizer_params:
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.02
+      eps: 0.00000001
+    lora:
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "to_k"
+        - "to_q"
+        - "to_v"
+        - "to_out.0"
+    text_encoder_lora:
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "q_proj"
+        - "k_proj"
+        - "v_proj"
+        - "out_proj"
+    lr_scheduler: "constant"
+    lr_scheduler_params:
+      num_warmup_steps: 0
+      num_training_steps: 1000
+      num_cycles: 1
+      power: 1
+  model:
+    name_or_path: "stabilityai/stable-diffusion-xl-base-1.0"
+    quantization:
+      bits: 4
+      quantize_text_encoder: false
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+  sample:
+    sample_every: 200
+    prompts:
+      - "portrait photo of sks man, natural light, sharp focus, 50mm, highly detailed"
+    neg:
+      - "painting, illustration, cartoon, blurry, low quality"
+    seed: 42
+    walk_seed: true
+    guidance_scale: 7
+    sample_steps: 20

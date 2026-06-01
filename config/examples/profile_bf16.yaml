@@ -1,0 +1,83 @@
+---
+# Profiling variant: native bf16 base (NO 4-bit quantization) to measure the
+# per-step cost of bitsandbytes 4-bit dequantization vs. raw bf16 matmuls.
+job: train
+version: "prof"
+name: "profile_bf16"
+output_folder: "output"
+config:
+  logging_folder: "logs"
+  device: "cuda:0"
+  allow_tf32: true
+  matmul_precision: "high"
+  cudnn_benchmark: true
+  instant_prompt: "SKS"
+  class_prompt: "man"
+  train:
+    dataset_folder: "/path/to/images/folder"
+    batch_size: 1
+    max_train_steps: 30
+    save_every: 0
+    checkpoints_total_limit: 8
+    max_grad_norm: 1.0
+    gradient_accumulation_steps: 1
+    seed: 42
+    dtype: bf16
+    gradient_checkpointing: false
+    cache_latents: true
+    channels_last: false
+    torch_compile: true
+    train_text_encoder: false
+    resolution: 1024
+    num_workers: 4
+    loss_decay: 0.995
+    skip_pre_train_sample: true
+    disable_sampling: true
+    profile:
+      enabled: true
+      warmup: 5
+      report_every: 0
+    optimizer: "adamw"
+    optimizer_params:
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.02
+      eps: 0.00000001
+    lora:
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "to_k"
+        - "to_q"
+        - "to_v"
+        - "to_out.0"
+    text_encoder_lora:
+      rank: 4
+      use_dora: false
+      lora_alpha: 4
+      init_lora_weights: "gaussian"
+      target_modules:
+        - "q_proj"
+        - "k_proj"
+        - "v_proj"
+        - "out_proj"
+    lr_scheduler: "constant"
+    lr_scheduler_params:
+      num_warmup_steps: 0
+      num_training_steps: 1000
+      num_cycles: 1
+      power: 1
+  model:
+    name_or_path: "stabilityai/stable-diffusion-xl-base-1.0"
+  sample:
+    sample_every: 200
+    prompts:
+      - "portrait photo of sks man, natural light, sharp focus, 50mm, highly detailed"
+    neg:
+      - "painting, illustration, cartoon, blurry, low quality"
+    seed: 42
+    walk_seed: true
+    guidance_scale: 7
+    sample_steps: 20
