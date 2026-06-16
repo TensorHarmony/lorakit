@@ -24,6 +24,8 @@ dependencies = [
     # ships with torch; on Windows it must be installed separately, so we only
     # require the Windows wheel here.
     "triton-windows; platform_system == 'Windows'",
+    "prodigyopt>=1.1.2",
+    "schedulefree>=1.4.1",
 ]
 
 [dependency-groups]

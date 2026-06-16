@@ -162,6 +162,76 @@ def _save_model_hook(
 
 
 class TrainJob(BaseJob):
+    @staticmethod
+    def _parse_rank_alpha(value):
+        """Parse a single ``(rank, lora_alpha)`` target value.
+
+        Accepts a native YAML sequence (``[4, 4]``), a string tuple (``"(16, 32)"``),
+        or a single int (rank, with ``lora_alpha`` defaulting to the same value).
+        """
+        if isinstance(value, (list, tuple)):
+            pair = list(value)
+        elif isinstance(value, str):
+            pair = [part for part in value.strip().lstrip("(").rstrip(")").split(",") if part.strip()]
+        elif isinstance(value, int):
+            pair = [value, value]
+        else:
+            raise ValueError(f"target_modules values must be (rank, lora_alpha), got {value!r}")
+        if len(pair) != 2:
+            raise ValueError(f"target_modules values must be (rank, lora_alpha), got {value!r}")
+        return int(pair[0]), int(pair[1])
+
+    @staticmethod
+    def _load_alpha_pattern_file(path):
+        """Load a block-qualified ``alpha_pattern`` map (e.g. from perturbation-probe).
+
+        The file is JSON with an ``"alpha_pattern"`` object mapping PEFT regex keys
+        (matched via ``re.match(r"(.*\\.)?(KEY)$", layer_name)``) to ``lora_alpha``
+        values. Used to scale each LoRA layer's strength by its measured identity
+        impact so fine-tuning concentrates capacity in high-impact regions.
+        """
+        import json
+        from pathlib import Path
+
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"alpha_pattern_file not found: {p}")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        alpha_pattern = data.get("alpha_pattern", data)
+        if not isinstance(alpha_pattern, dict) or not alpha_pattern:
+            raise ValueError(
+                f"alpha_pattern_file {p} has no non-empty 'alpha_pattern' mapping"
+            )
+        return {str(k): float(v) for k, v in alpha_pattern.items()}
+
+    @staticmethod
+    def _parse_lora_targets(target_modules):
+        """Normalize a LoRA ``target_modules`` mapping into PEFT-ready fields.
+
+        ``target_modules`` is a mapping of ``module_name -> (rank, lora_alpha)``.
+        Returns ``(modules, rank_pattern, alpha_pattern, default_rank, default_alpha)``,
+        where the defaults (PEFT's ``r``/``lora_alpha`` fallback) are the max of the
+        per-module values.
+        """
+        if not isinstance(target_modules, dict) or not target_modules:
+            raise ValueError(
+                "target_modules must be a non-empty mapping of module -> (rank, lora_alpha)"
+            )
+        modules = list(target_modules.keys())
+        rank_pattern = {}
+        alpha_pattern = {}
+        for name, value in target_modules.items():
+            rank, alpha = TrainJob._parse_rank_alpha(value)
+            rank_pattern[name] = rank
+            alpha_pattern[name] = alpha
+        return (
+            modules,
+            rank_pattern,
+            alpha_pattern,
+            max(rank_pattern.values()),
+            max(alpha_pattern.values()),
+        )
+
     def __init__(self, config, version, name, root_folder):
         super().__init__(version, name, root_folder)
 
@@ -294,17 +364,36 @@ class TrainJob(BaseJob):
         if self._unet_lora is None:
             raise ValueError("unet_lora is required")
 
-        self._unet_lora_rank = self._unet_lora.get("r", self._unet_lora.get("rank"))
-        if self._unet_lora_rank is None:
-            raise ValueError("unet_lora_rank is required")
+        (
+            self._unet_lora_target_modules,
+            self._unet_lora_rank_pattern,
+            self._unet_lora_alpha_pattern,
+            self._unet_lora_rank,
+            self._unet_lora_alpha,
+        ) = self._parse_lora_targets(
+            self._unet_lora.get(
+                "target_modules",
+                {"to_k": (4, 4), "to_q": (4, 4), "to_v": (4, 4), "to_out.0": (4, 4)},
+            )
+        )
 
-        self._unet_lora_alpha = self._unet_lora.get("lora_alpha", self._unet_lora_rank)
+        # Optional per-(block x module_type) alpha mask (e.g. exported by
+        # perturbation-probe). Its block-qualified regex keys are inserted *before*
+        # the generic per-type keys so PEFT's get_pattern_key matches them first,
+        # scaling each LoRA layer's alpha by its measured identity impact.
+        alpha_pattern_file = self._unet_lora.get("alpha_pattern_file", None)
+        if alpha_pattern_file:
+            mask = self._load_alpha_pattern_file(alpha_pattern_file)
+            self._unet_lora_alpha_pattern = {**mask, **self._unet_lora_alpha_pattern}
+            self._unet_lora_alpha = max(
+                self._unet_lora_alpha, *self._unet_lora_alpha_pattern.values()
+            )
+            print(
+                f"Loaded LoRA alpha mask from {alpha_pattern_file} "
+                f"({len(mask)} block-qualified alpha entries)"
+            )
 
         self._unet_lora_init_weights = self._unet_lora.get("init_lora_weights", "gaussian")
-
-        self._unet_lora_target_modules = self._unet_lora.get(
-            "target_modules", ["to_k", "to_q", "to_v", "to_out.0"]
-        )
 
         self._unet_lora_use_dora = self._unet_lora.get("use_dora", False)
 
@@ -313,22 +402,21 @@ class TrainJob(BaseJob):
             if self._text_encoder_lora is None:
                 raise ValueError("text_encoder_lora is required")
 
-            self._text_encoder_lora_rank = self._text_encoder_lora.get(
-                "r", self._text_encoder_lora.get("rank")
-            )
-            if self._text_encoder_lora_rank is None:
-                raise ValueError("text_encoder_lora_rank is required")
-
-            self._text_encoder_lora_alpha = self._text_encoder_lora.get(
-                "lora_alpha", self._text_encoder_lora_rank
+            (
+                self._text_encoder_lora_target_modules,
+                self._text_encoder_lora_rank_pattern,
+                self._text_encoder_lora_alpha_pattern,
+                self._text_encoder_lora_rank,
+                self._text_encoder_lora_alpha,
+            ) = self._parse_lora_targets(
+                self._text_encoder_lora.get(
+                    "target_modules",
+                    {"q_proj": (4, 4), "k_proj": (4, 4), "v_proj": (4, 4), "out_proj": (4, 4)},
+                )
             )
 
             self._text_encoder_lora_init_weights = self._text_encoder_lora.get(
                 "init_lora_weights", "gaussian"
-            )
-
-            self._text_encoder_lora_target_modules = self._text_encoder_lora.get(
-                "target_modules", ["q_proj", "k_proj", "v_proj", "out_proj"]
             )
 
             self._text_encoder_lora_use_dora = self._text_encoder_lora.get("use_dora", False)
@@ -338,9 +426,17 @@ class TrainJob(BaseJob):
         if self._optimizer_name is None:
             raise ValueError("optimizer is required")
         self._optimizer_name = self._optimizer_name.lower()
-        if self._optimizer_name not in ["adamw", "adamw8bit", "adamwschedulefree", "prodigy"]:
+        if self._optimizer_name not in [
+            "adamw",
+            "adamw8bit",
+            "adamwschedulefree",
+            "adamwanchored",
+            "adamwanchoredschedulefree",
+            "prodigy",
+        ]:
             raise ValueError(
-                "Invalid optimizer. Supported optimizers are adamw, adamw8bit, adamwschedulefree, and prodigy."
+                "Invalid optimizer. Supported optimizers are adamw, adamw8bit, "
+                "adamwschedulefree, adamwanchored, adamwanchoredschedulefree, and prodigy."
             )
 
         self._optimizer_params = self._train_config.get("optimizer_params", None)
@@ -373,7 +469,18 @@ class TrainJob(BaseJob):
         self._torch_compile_mode = self._train_config.get("torch_compile_mode", "default")
 
         self._with_prior_preservation = self._train_config.get("with_prior_preservation", False)
+        # Folder of class images (e.g. base-model generations of the bare class
+        # prompt). Required for prior preservation: each step trains on instance
+        # and class images jointly so the LoRA keeps the base model's prior for
+        # the class (backgrounds, scenes, textures) instead of collapsing onto
+        # the instance dataset's look.
+        self._class_data_folder = self._train_config.get("class_data_folder", None)
+        self._num_class_images = self._train_config.get("num_class_images", None)
         if self._with_prior_preservation:
+            if self._class_data_folder is None:
+                raise ValueError(
+                    "class_data_folder is required when with_prior_preservation is true"
+                )
             print("Using prior preservation")
 
         self._prior_loss_weight = self._train_config.get("prior_loss_weight", 1.0)
@@ -507,17 +614,27 @@ class TrainJob(BaseJob):
             except ImportError:
                 raise ImportError("Please install schedulefree to use AdamWScheduleFree optimizer")
             optimizer = AdamWScheduleFree(params_to_optimize, **self._optimizer_params)
+        elif self._optimizer_name == "adamwanchored":
+            from lorakit.optimizers import AnchoredAdamW
+
+            optimizer = AnchoredAdamW(params_to_optimize, **self._optimizer_params)
+        elif self._optimizer_name == "adamwanchoredschedulefree":
+            from lorakit.optimizers import AnchoredAdamWScheduleFree
+
+            optimizer = AnchoredAdamWScheduleFree(params_to_optimize, **self._optimizer_params)
         elif self._optimizer_name == "prodigy":
             try:
-                from prodigy import ProdigyOptimizer
+                from prodigyopt import Prodigy
             except ImportError:
-                raise ImportError("Please install prodigy to use Prodigy optimizer")
+                raise ImportError(
+                    "Please install prodigyopt to use the Prodigy optimizer (`uv add prodigyopt`)"
+                )
             lr = self._optimizer_params.get("lr", None)
             if lr is None:
                 raise ValueError("lr is required for Prodigy optimizer")
             if lr < 0.1:
                 raise ValueError("lr is better to be set around 1.0")
-            optimizer = ProdigyOptimizer(params_to_optimize, lr=lr, **self._optimizer_params)
+            optimizer = Prodigy(params_to_optimize, **self._optimizer_params)
         else:
             raise ValueError(f"Unsupported optimizer: {self._optimizer_name}")
 
@@ -708,6 +825,7 @@ class TrainJob(BaseJob):
             )
             samples_dir = Path(self._experiment_folder) / "samples"
             samples_dir.mkdir(parents=True, exist_ok=True)
+            generated_images = []
             with inference_ctx:
                 if self._sample_neg:
                     sample_prompts = zip(self._sample_prompts, self._sample_neg)
@@ -732,12 +850,110 @@ class TrainJob(BaseJob):
                     ).images[0]
                     image_path = samples_dir / f"{int(time.time())}_{global_step:010d}_{i}.jpg"
                     image.save(image_path)
+                    generated_images.append(image)
+            # Quantitative identity / consistency readout (CLIP-vision based).
+            try:
+                self._compute_identity_metrics(accelerator, generated_images, global_step)
+            except Exception as e:  # noqa: BLE001 - metric is best-effort, never fail training
+                print(f"IDENTITY step={global_step} metric_error={type(e).__name__}: {e}")
         # Restore the (shared) VAE to fp32 in case the training loop still uses it
         # (e.g. when latents are not cached).
         vae.to(dtype=torch.float32)
         del pipeline
         del sample_scheduler
         _flush()
+
+    def _get_clip_identity_model(self, device):
+        """Lazily load a CLIP-vision model used only for the identity metric."""
+        if getattr(self, "_clip_model", None) is not None:
+            return self._clip_model, self._clip_processor
+        from transformers import CLIPImageProcessor, CLIPModel
+
+        model_id = getattr(self, "_identity_clip_model_id", "openai/clip-vit-base-patch32")
+        print(f"Loading CLIP identity model ({model_id}) for the identity metric")
+        self._clip_model = CLIPModel.from_pretrained(model_id).to(device).eval()
+        self._clip_processor = CLIPImageProcessor.from_pretrained(model_id)
+        return self._clip_model, self._clip_processor
+
+    @torch.no_grad()
+    def _embed_images_clip(self, images, device):
+        model, processor = self._get_clip_identity_model(device)
+        inputs = processor(images=images, return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(
+            device=device, dtype=next(model.parameters()).dtype
+        )
+        feats = model.get_image_features(pixel_values=pixel_values)
+        # transformers >=5 returns a BaseModelOutputWithPooling whose `pooler_output`
+        # holds the projected image embeds; older versions return the tensor directly.
+        if not isinstance(feats, torch.Tensor):
+            feats = getattr(feats, "pooler_output", None)
+            if feats is None:
+                raise AttributeError("CLIP get_image_features returned no usable embeds")
+        return F.normalize(feats.float(), dim=-1)
+
+    def _get_reference_identity_embeds(self, device):
+        """CLIP embeddings of the training images (computed once, then cached)."""
+        if getattr(self, "_ref_identity_embeds", None) is not None:
+            return self._ref_identity_embeds
+        from PIL import Image
+        from PIL.ImageOps import exif_transpose
+
+        exts = (".png", ".jpg", ".jpeg", ".webp")
+        paths = sorted(
+            p for p in Path(self._dataset_folder).iterdir() if p.suffix.lower() in exts
+        )
+        imgs = []
+        for p in paths:
+            img = exif_transpose(Image.open(p))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            imgs.append(img)
+        self._ref_identity_embeds = self._embed_images_clip(imgs, device)
+        return self._ref_identity_embeds
+
+    @torch.no_grad()
+    def _compute_identity_metrics(self, accelerator, generated_images, global_step):
+        """
+        Log a quantitative identity / consistency readout for the generated samples.
+
+        - likeness: mean cosine sim of each generated sample to the training identity
+          centroid (higher = generated subject looks more like the training photos).
+        - consistency: mean pairwise cosine sim among the generated samples (higher =
+          the subject renders consistently across different prompts/seeds).
+        - max_match: mean over generated samples of the *best* match to any single
+          training image (a high value alongside low diversity hints at memorization).
+        - ref_cohesion: mean pairwise sim within the training set itself (context only).
+        """
+        if not generated_images:
+            return
+        device = accelerator.device
+        ref = self._get_reference_identity_embeds(device)
+        gen = self._embed_images_clip(generated_images, device)
+
+        ref_mean = F.normalize(ref.mean(0, keepdim=True), dim=-1)
+        likeness = (gen @ ref_mean.t()).squeeze(1).mean().item()
+
+        if gen.shape[0] > 1:
+            sim = gen @ gen.t()
+            n = gen.shape[0]
+            consistency = ((sim.sum() - n) / (n * (n - 1))).item()
+        else:
+            consistency = float("nan")
+
+        if ref.shape[0] > 1:
+            rsim = ref @ ref.t()
+            rn = ref.shape[0]
+            ref_cohesion = ((rsim.sum() - rn) / (rn * (rn - 1))).item()
+        else:
+            ref_cohesion = float("nan")
+
+        max_match = (gen @ ref.t()).max(dim=1).values.mean().item()
+
+        print(
+            f"IDENTITY step={global_step} likeness={likeness:.4f} "
+            f"consistency={consistency:.4f} max_match={max_match:.4f} "
+            f"ref_cohesion={ref_cohesion:.4f} n_ref={ref.shape[0]} n_gen={gen.shape[0]}"
+        )
 
     def run(self, callbacks: list[BaseCallback] = []):
         accelerator_project_config = ProjectConfiguration(
@@ -858,6 +1074,8 @@ class TrainJob(BaseJob):
             lora_alpha=self._unet_lora_alpha,
             init_lora_weights=self._unet_lora_init_weights,
             target_modules=self._unet_lora_target_modules,
+            rank_pattern=self._unet_lora_rank_pattern,
+            alpha_pattern=self._unet_lora_alpha_pattern,
         )
         unet.add_adapter(unet_lora_config)
 
@@ -869,6 +1087,8 @@ class TrainJob(BaseJob):
                 lora_alpha=self._text_encoder_lora_alpha,
                 init_lora_weights=self._text_encoder_lora_init_weights,
                 target_modules=self._text_encoder_lora_target_modules,
+                rank_pattern=self._text_encoder_lora_rank_pattern,
+                alpha_pattern=self._text_encoder_lora_alpha_pattern,
             )
             text_encoder_1.add_adapter(text_encoder_lora_config)
             text_encoder_2.add_adapter(text_encoder_lora_config)
@@ -984,6 +1204,8 @@ class TrainJob(BaseJob):
             self._dataset_folder,
             self._instant_prompt,
             self._class_prompt,
+            class_data_root=self._class_data_folder if self._with_prior_preservation else None,
+            class_num=self._num_class_images,
             resolution=self._resolution,
         )
         # `persistent_workers` avoids respawning the worker processes (and re-running
@@ -998,7 +1220,9 @@ class TrainJob(BaseJob):
             train_dataset,
             batch_size=self._batch_size,
             shuffle=True,
-            collate_fn=collate_fn,
+            collate_fn=partial(
+                collate_fn, with_prior_preservation=self._with_prior_preservation
+            ),
             num_workers=self._num_workers,
             pin_memory=True,
             **dataloader_kwargs,
@@ -1381,10 +1605,18 @@ class TrainJob(BaseJob):
                             f"Unknown prediction type {noise_scheduler.config.prediction_type}"
                         )
 
+                    # Timesteps aligned with the (possibly chunked) instance loss.
+                    # With prior preservation the batch is [instance, class]; the
+                    # instance loss below is computed on the first half only, so the
+                    # SNR weighting must use the first half's timesteps too (otherwise
+                    # the instance gradient gets rescaled by the class image's
+                    # unrelated timestep weight every step).
+                    loss_timesteps = timesteps
                     if self._with_prior_preservation:
                         # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
                         model_pred, model_pred_prior = torch.chunk(model_pred, 2, dim=0)
                         target, target_prior = torch.chunk(target, 2, dim=0)
+                        loss_timesteps = torch.chunk(timesteps, 2, dim=0)[0]
 
                         # Compute prior loss
                         if weighting is not None:
@@ -1416,10 +1648,10 @@ class TrainJob(BaseJob):
                         # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                         # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                         # This is discussed in Section 4.2 of the same paper.
-                        snr = compute_snr(noise_scheduler, timesteps)
+                        snr = compute_snr(noise_scheduler, loss_timesteps)
                         base_weight = (
                             torch.stack(
-                                [snr, self._snr_gamma * torch.ones_like(timesteps)], dim=1
+                                [snr, self._snr_gamma * torch.ones_like(snr)], dim=1
                             ).min(dim=1)[0]
                             / snr
                         )

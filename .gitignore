@@ -1,3 +1,4 @@
+.cursor/
 __pycache__/
 output/
 build/
@@ -15,3 +16,5 @@ output/**/*.yaml
 config/*
 !config/examples/
 !config/examples/**
+
+data/
