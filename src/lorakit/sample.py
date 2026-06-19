@@ -8,7 +8,14 @@ import logging
 from pathlib import Path
 
 import torch
-from diffusers import StableDiffusionXLPipeline
+from diffusers import (
+    DDIMScheduler,
+    DDPMScheduler,
+    DPMSolverMultistepScheduler,
+    EulerDiscreteScheduler,
+    StableDiffusionXLPipeline,
+    UniPCMultistepScheduler,
+)
 from tqdm import tqdm
 
 from lorakit.config import resolve_user_path
@@ -30,6 +37,26 @@ def _parse_dtype(dtype_str: str) -> tuple[torch.dtype, str]:
     if dtype_str in ("float32", "fp32"):
         return torch.float32, "no"
     raise ValueError("Invalid dtype. Supported dtypes are bf16, fp16, fp32, and float32.")
+
+
+def _make_scheduler(pipeline: StableDiffusionXLPipeline, name: str):
+    cfg = pipeline.scheduler.config
+    name = name.lower()
+    if name == "ddpm":
+        return DDPMScheduler.from_config(cfg)
+    if name == "ddim":
+        return DDIMScheduler.from_config(cfg)
+    if name == "euler":
+        return EulerDiscreteScheduler.from_config(cfg)
+    if name == "dpmpp":
+        return DPMSolverMultistepScheduler.from_config(
+            cfg, algorithm_type="dpmsolver++", use_karras_sigmas=True
+        )
+    if name == "unipc":
+        return UniPCMultistepScheduler.from_config(cfg)
+    raise ValueError(
+        f"Unsupported scheduler: {name!r} (use ddpm, ddim, euler, dpmpp, or unipc)"
+    )
 
 
 def _resolve_lora_weights(path: str | Path) -> Path:
@@ -89,6 +116,7 @@ class SampleJob(BaseJob):
             "steps", sample_config.get("sample_steps", 20)
         )
         self._resolution = sample_config.get("resolution", 1024)
+        self._scheduler = sample_config.get("scheduler", None)
 
         lora_weights = sample_config.get("lora_weights", None)
         self._lora_weights = (
@@ -154,6 +182,9 @@ class SampleJob(BaseJob):
         )
         pipeline.set_progress_bar_config(disable=True)
         pipeline = pipeline.to(self._device)
+        if self._scheduler is not None:
+            pipeline.scheduler = _make_scheduler(pipeline, self._scheduler)
+            print(f"Scheduler: {self._scheduler}")
 
         lora_path = None
         if self._lora_weights is not None:
