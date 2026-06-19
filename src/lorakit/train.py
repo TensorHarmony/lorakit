@@ -44,6 +44,9 @@ def _flush():
     gc.collect()
 
 
+SCHEDULEFREE_OPTIMIZERS = frozenset({"adamwschedulefree", "adamwanchoredschedulefree"})
+
+
 # copied from train_xl.py
 def _tokenize_prompt(tokenizer, prompt):
     text_inputs = tokenizer(
@@ -172,7 +175,8 @@ class TrainJob(BaseJob):
         if isinstance(value, (list, tuple)):
             pair = list(value)
         elif isinstance(value, str):
-            pair = [part for part in value.strip().lstrip("(").rstrip(")").split(",") if part.strip()]
+            stripped = value.strip().lstrip("(").rstrip(")")
+            pair = [part for part in stripped.split(",") if part.strip()]
         elif isinstance(value, int):
             pair = [value, value]
         else:
@@ -232,19 +236,22 @@ class TrainJob(BaseJob):
             max(alpha_pattern.values()),
         )
 
-    def __init__(self, config, version, name, root_folder):
+    def __init__(self, config, version, name, root_folder, *, config_path=None):
         super().__init__(version, name, root_folder)
+        self._config_path = config_path
 
         self._device = config.get("device", "cpu")
         if torch.cuda.is_available():
             if self._device == "cpu":
                 print(
-                    "Warning: CUDA is available, but CPU is being used. Consider using a GPU for faster training."
+                    "Warning: CUDA is available, but CPU is being used. "
+                    "Consider using a GPU for faster training."
                 )
         else:
             if self._device != "cpu":
                 raise RuntimeError(
-                    "CUDA is not available, but GPU device was specified. Please use a machine with CUDA support or specify 'cpu' as the device."
+                    "CUDA is not available, but GPU device was specified. "
+                    "Please use a machine with CUDA support or specify 'cpu' as the device."
                 )
 
         print(f"Using device: {self._device}")
@@ -383,6 +390,11 @@ class TrainJob(BaseJob):
         # scaling each LoRA layer's alpha by its measured identity impact.
         alpha_pattern_file = self._unet_lora.get("alpha_pattern_file", None)
         if alpha_pattern_file:
+            from lorakit.config import resolve_user_path
+
+            alpha_pattern_file = resolve_user_path(
+                alpha_pattern_file, config_path=self._config_path, must_exist=True
+            )
             mask = self._load_alpha_pattern_file(alpha_pattern_file)
             self._unet_lora_alpha_pattern = {**mask, **self._unet_lora_alpha_pattern}
             self._unet_lora_alpha = max(
@@ -447,9 +459,16 @@ class TrainJob(BaseJob):
         if not isinstance(self._resolution, int):
             raise ValueError("Invalid resolution. resolution must be an integer")
 
-        self._dataset_folder = self._train_config.get("dataset_folder", None)
-        if self._dataset_folder is None:
+        dataset_folder = self._train_config.get("dataset_folder", None)
+        if dataset_folder is None:
             raise ValueError("dataset_folder is required")
+        from lorakit.config import resolve_user_path
+
+        self._dataset_folder = str(
+            resolve_user_path(
+                dataset_folder, config_path=self._config_path, must_exist=True
+            )
+        )
 
         self._num_workers = self._train_config.get("num_workers", 1)
         if self._num_workers > 1:
@@ -519,25 +538,54 @@ class TrainJob(BaseJob):
 
         self._checkpoints_total_limit = self._train_config.get("checkpoints_total_limit", None)
         self._sample_config = config.get("sample", None)
+        self._sample_prompt_seeds: list[int] | None = None
         if self._sample_config is not None:
             self._sample_every = self._sample_config.get("sample_every", 0)
             if self._sample_every < 0:
                 raise ValueError("sample_every must be >= 0")
-            self._sample_prompts = self._sample_config.get("prompts", None)
-            if self._sample_prompts is None:
-                raise ValueError("sample_prompts is required")
-            self._sample_neg = self._sample_config.get("neg", None)
-            if self._sample_neg is None:
-                raise ValueError("sample_neg is required")
-            if self._sample_neg is not None:
+
+            prompt_file = self._sample_config.get("prompt_file", None)
+            inline_prompts = self._sample_config.get("prompts", None)
+            if prompt_file:
+                from lorakit.config import resolve_user_path
+                from lorakit.prompts import load_training_sample_prompts
+
+                resolved = resolve_user_path(
+                    prompt_file, config_path=self._config_path, must_exist=True
+                )
+                self._sample_prompts, self._sample_neg, self._sample_prompt_seeds = (
+                    load_training_sample_prompts(
+                        resolved,
+                        trigger=self._instant_prompt,
+                        class_word=self._class_prompt,
+                    )
+                )
+                print(f"Loaded {len(self._sample_prompts)} sample prompts from {resolved}")
+            elif inline_prompts is not None:
+                self._sample_prompts = inline_prompts
+                self._sample_neg = self._sample_config.get("neg", None)
+                if self._sample_neg is None:
+                    raise ValueError("sample.neg is required when sample.prompts is set")
                 if len(self._sample_neg) != len(self._sample_prompts):
                     raise ValueError("neg and prompts must have the same length")
+            else:
+                raise ValueError("sample requires prompt_file or prompts")
+
             self._sample_seed = self._sample_config.get("seed", 42)
             self._sample_guidance_scale = self._sample_config.get("guidance_scale", 7)
-            self._sample_steps = self._sample_config.get("steps", 20)
+            self._sample_steps = self._sample_config.get(
+                "steps", self._sample_config.get("sample_steps", 20)
+            )
+            self._use_prompt_seeds = self._sample_config.get(
+                "use_prompt_seeds", prompt_file is not None
+            )
             self._walk_seed = self._sample_config.get("walk_seed", False)
-            if self._walk_seed:
+            if self._walk_seed and self._use_prompt_seeds:
+                print("Warning: walk_seed ignored when use_prompt_seeds is true")
+            elif self._walk_seed:
                 print("Walking seed")
+            elif self._use_prompt_seeds:
+                print("Using per-prompt seeds from prompt file")
 
         self._resume_from_checkpoint = self._train_config.get("resume_from_checkpoint", None)
         if self._resume_from_checkpoint is not None:
@@ -606,13 +654,17 @@ class TrainJob(BaseJob):
             try:
                 import bitsandbytes as bnb
             except ImportError:
-                raise ImportError("Please install bitsandbytes to use AdamW8bit optimizer")
+                raise ImportError(
+                    "Please install bitsandbytes to use AdamW8bit optimizer"
+                ) from None
             optimizer = bnb.optim.AdamW8bit(params_to_optimize, **self._optimizer_params)
         elif self._optimizer_name == "adamwschedulefree":
             try:
                 from schedulefree import AdamWScheduleFree
             except ImportError:
-                raise ImportError("Please install schedulefree to use AdamWScheduleFree optimizer")
+                raise ImportError(
+                    "Please install schedulefree to use AdamWScheduleFree optimizer"
+                ) from None
             optimizer = AdamWScheduleFree(params_to_optimize, **self._optimizer_params)
         elif self._optimizer_name == "adamwanchored":
             from lorakit.optimizers import AnchoredAdamW
@@ -628,7 +680,7 @@ class TrainJob(BaseJob):
             except ImportError:
                 raise ImportError(
                     "Please install prodigyopt to use the Prodigy optimizer (`uv add prodigyopt`)"
-                )
+                ) from None
             lr = self._optimizer_params.get("lr", None)
             if lr is None:
                 raise ValueError("lr is required for Prodigy optimizer")
@@ -818,25 +870,33 @@ class TrainJob(BaseJob):
             # (no SDXL overflow), so casting the pipeline VAE to the training dtype for
             # sampling is both correct and safe. Restored to fp32 afterwards.
             pipeline.vae.to(device=accelerator.device, dtype=self._dtype)
-            # Currently the context determination is a bit hand-wavy. We can improve it in the future if there's a better
-            # way to condition it. Reference: https://github.com/huggingface/diffusers/pull/7126#issuecomment-1968523051
+            # Currently the context determination is a bit hand-wavy. We can improve it
+            # in the future if there's a better way to condition it. Reference:
+            # https://github.com/huggingface/diffusers/pull/7126#issuecomment-1968523051
             inference_ctx = (
-                contextlib.nullcontext()  # if "playground" in self.model_name_or_path else torch.cuda.amp.autocast(accelerator.device)
+                contextlib.nullcontext()
+                # if "playground" in self.model_name_or_path
+                # else torch.cuda.amp.autocast(accelerator.device)
             )
             samples_dir = Path(self._experiment_folder) / "samples"
             samples_dir.mkdir(parents=True, exist_ok=True)
             generated_images = []
             with inference_ctx:
                 if self._sample_neg:
-                    sample_prompts = zip(self._sample_prompts, self._sample_neg)
+                    sample_prompts = zip(self._sample_prompts, self._sample_neg, strict=False)
                 else:
-                    sample_prompts = zip(self._sample_prompts, [None] * len(self._sample_prompts))
+                    none_neg = [None] * len(self._sample_prompts)
+                    sample_prompts = zip(self._sample_prompts, none_neg, strict=False)
                 for i, (p, n) in enumerate(sample_prompts):
+                    if self._use_prompt_seeds and self._sample_prompt_seeds:
+                        gen_seed = self._sample_prompt_seeds[i]
+                    elif self._walk_seed:
+                        gen_seed = self._sample_seed + i
+                    else:
+                        gen_seed = self._sample_seed
                     generator = (
-                        torch.Generator(device=accelerator.device).manual_seed(
-                            self._sample_seed + i if self._walk_seed else 0
-                        )
-                        if self._sample_seed
+                        torch.Generator(device=accelerator.device).manual_seed(gen_seed)
+                        if gen_seed is not None
                         else None
                     )
                     image = pipeline(
@@ -955,7 +1015,9 @@ class TrainJob(BaseJob):
             f"ref_cohesion={ref_cohesion:.4f} n_ref={ref.shape[0]} n_gen={gen.shape[0]}"
         )
 
-    def run(self, callbacks: list[BaseCallback] = []):
+    def run(self, callbacks: list[BaseCallback] = None):
+        if callbacks is None:
+            callbacks = []
         accelerator_project_config = ProjectConfiguration(
             project_dir=self._experiment_folder, logging_dir=self._logging_path
         )
@@ -1131,8 +1193,8 @@ class TrainJob(BaseJob):
                 unexpected_keys = getattr(incompatible_keys, "unexpected_keys", None)
                 if unexpected_keys:
                     print(
-                        f"Loading adapter weights from state_dict led to unexpected keys not found in the model: "
-                        f" {unexpected_keys}. "
+                        "Loading adapter weights from state_dict led to unexpected keys "
+                        f"not found in the model:  {unexpected_keys}. "
                     )
 
             if self._train_text_encoder:
@@ -1233,7 +1295,8 @@ class TrainJob(BaseJob):
         if self._cache_latents:
             if self._with_prior_preservation:
                 print(
-                    "cache_latents is not supported with prior preservation; encoding latents every step"
+                    "cache_latents is not supported with prior preservation; "
+                    "encoding latents every step"
                 )
             else:
                 print(f"Caching VAE latents for {train_dataset.num_instance_images} image(s)")
@@ -1264,8 +1327,8 @@ class TrainJob(BaseJob):
                 return prompt_embeds, pooled_prompt_embeds
 
         # If no type of tuning is done on the text_encoder and custom instance prompts are NOT
-        # provided (i.e. the --instance_prompt is used for all images), we encode the instance prompt once to avoid
-        # the redundant encoding.
+        # provided (i.e. the --instance_prompt is used for all images), we encode the instance
+        # prompt once to avoid the redundant encoding.
         if not self._train_text_encoder:
             instance_prompt_hidden_states, instance_pooled_prompt_embeds = compute_text_embeddings(
                 self._instant_prompt, text_encoders, tokenizers
@@ -1283,9 +1346,9 @@ class TrainJob(BaseJob):
             del tokenizers, text_encoders
             _flush()
 
-        # If custom instance prompts are NOT provided (i.e. the instance prompt is used for all images),
-        # pack the statically computed variables appropriately here. This is so that we don't
-        # have to pass them to the dataloader.
+        # If custom instance prompts are NOT provided (i.e. the instance prompt is used for all
+        # images), pack the statically computed variables appropriately here. This is so that we
+        # don't have to pass them to the dataloader.
 
         if not train_dataset.custom_instance_prompts:
             if not self._train_text_encoder:
@@ -1296,8 +1359,9 @@ class TrainJob(BaseJob):
                     unet_add_text_embeds = torch.cat(
                         [unet_add_text_embeds, class_pooled_prompt_embeds], dim=0
                     )
-            # if we're optmizing the text encoder (both if instance prompt is used for all images or custom prompts) we need to tokenize and encode the
-            # batch prompts on all training steps
+            # if we're optmizing the text encoder (both if instance prompt is used for all
+            # images or custom prompts) we need to tokenize and encode the batch prompts on
+            # all training steps
             else:
                 tokens_one = _tokenize_prompt(tokenizer_1, self._instance_prompt)
                 tokens_two = _tokenize_prompt(tokenizer_2, self._instance_prompt)
@@ -1333,7 +1397,8 @@ class TrainJob(BaseJob):
                 unet, optimizer, train_dataloader, lr_scheduler
             )
 
-        # We need to recalculate our total training steps as the size of the training dataloader may have changed.
+        # We need to recalculate our total training steps as the size of the training
+        # dataloader may have changed.
         num_update_steps_per_epoch = math.ceil(
             len(train_dataloader) / self._gradient_accumulation_steps
         )
@@ -1373,7 +1438,8 @@ class TrainJob(BaseJob):
 
             if path is None:
                 accelerator.print(
-                    f"Checkpoint '{self._resume_from_checkpoint}' does not exist. Starting a new training run."
+                    f"Checkpoint '{self._resume_from_checkpoint}' does not exist. "
+                    "Starting a new training run."
                 )
                 self._resume_from_checkpoint = None
                 initial_global_step = 0
@@ -1389,8 +1455,8 @@ class TrainJob(BaseJob):
             initial_global_step = 0
 
         if not self._disable_sampling and not self._skip_pre_train_sample:
-            self._generate_samples(
-                accelerator, global_step, vae, unet, text_encoder_1, text_encoder_2
+            self._generate_samples_with_optimizer_eval(
+                accelerator, global_step, vae, unet, text_encoder_1, text_encoder_2, optimizer
             )
 
         progress_bar = tqdm(
@@ -1410,7 +1476,7 @@ class TrainJob(BaseJob):
             self.set_to_train(accelerator, text_encoder_1, text_encoder_2, unet, optimizer)
 
             profiler.wall_start("data_wait")
-            for step, batch in enumerate(train_dataloader):
+            for _step, batch in enumerate(train_dataloader):
                 profiler.wall_stop("data_wait")
                 with accelerator.accumulate(unet):
                     profiler.tic("vae_encode")
@@ -1469,9 +1535,9 @@ class TrainJob(BaseJob):
                         )
                         timesteps = timesteps.long()
                     else:
-                        # in EDM formulation, the model is conditioned on the pre-conditioned noise levels
-                        # instead of discrete timesteps, so here we sample indices to get the noise levels
-                        # from `scheduler.timesteps`
+                        # in EDM formulation, the model is conditioned on the pre-conditioned
+                        # noise levels instead of discrete timesteps, so here we sample indices
+                        # to get the noise levels from `scheduler.timesteps`
                         indices = torch.randint(
                             0, noise_scheduler.config.num_train_timesteps, (bsz,)
                         )
@@ -1480,9 +1546,10 @@ class TrainJob(BaseJob):
                     # Add noise to the model input according to the noise magnitude at each timestep
                     # (this is the forward diffusion process)
                     noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
-                    # For EDM-style training, we first obtain the sigmas based on the continuous timesteps.
-                    # We then precondition the final model inputs based on these sigmas instead of the timesteps.
-                    # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
+                    # For EDM-style training, we first obtain the sigmas based on the continuous
+                    # timesteps. We then precondition the final model inputs based on these
+                    # sigmas instead of the timesteps. Follow: Section 5 of
+                    # https://arxiv.org/abs/2206.00364.
                     if self._do_edm_style_training:
                         sigmas = _get_sigmas(
                             accelerator,
@@ -1508,11 +1575,14 @@ class TrainJob(BaseJob):
                                 device=accelerator.device,
                                 dtype=self._dtype,
                             )
-                            for s, c in zip(batch["original_sizes"], batch["crop_top_lefts"])
+                            for s, c in zip(
+                                batch["original_sizes"], batch["crop_top_lefts"], strict=False
+                            )
                         ]
                     )
 
-                    # Calculate the elements to repeat depending on the use of prior-preservation and custom captions.
+                    # Calculate the elements to repeat depending on the use of prior-preservation
+                    # and custom captions.
                     if not train_dataset.custom_instance_prompts:
                         elems_to_repeat_text_embeds = (
                             bsz // 2 if self._with_prior_preservation else bsz
@@ -1570,9 +1640,9 @@ class TrainJob(BaseJob):
                     profiler.tic("loss")
                     weighting = None
                     if self._do_edm_style_training:
-                        # Similar to the input preconditioning, the model predictions are also preconditioned
-                        # on noised model inputs (before preconditioning) and the sigmas.
-                        # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
+                        # Similar to the input preconditioning, the model predictions are also
+                        # preconditioned on noised model inputs (before preconditioning) and the
+                        # sigmas. Follow: Section 5 of https://arxiv.org/abs/2206.00364.
                         if is_edm_scheduler:
                             model_pred = noise_scheduler.precondition_outputs(
                                 noisy_model_input, model_pred, sigmas
@@ -1584,7 +1654,8 @@ class TrainJob(BaseJob):
                                 model_pred = model_pred * (-sigmas / (sigmas**2 + 1) ** 0.5) + (
                                     noisy_model_input / (sigmas**2 + 1)
                                 )
-                        # We are not doing weighting here because it tends result in numerical problems.
+                        # We are not doing weighting here because it tends result in numerical
+                        # problems.
                         # See: https://github.com/huggingface/diffusers/pull/7126#issuecomment-1968523051
                         # There might be other alternatives for weighting as well:
                         # https://github.com/huggingface/diffusers/pull/7126#discussion_r1505404686
@@ -1613,7 +1684,8 @@ class TrainJob(BaseJob):
                     # unrelated timestep weight every step).
                     loss_timesteps = timesteps
                     if self._with_prior_preservation:
-                        # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
+                        # Chunk the noise and model_pred into two parts and compute the loss on
+                        # each part separately.
                         model_pred, model_pred_prior = torch.chunk(model_pred, 2, dim=0)
                         target, target_prior = torch.chunk(target, 2, dim=0)
                         loss_timesteps = torch.chunk(timesteps, 2, dim=0)[0]
@@ -1646,8 +1718,8 @@ class TrainJob(BaseJob):
                             loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                     else:
                         # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
-                        # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-                        # This is discussed in Section 4.2 of the same paper.
+                        # Since we predict the noise instead of x_0, the original formulation is
+                        # slightly changed. This is discussed in Section 4.2 of the same paper.
                         snr = compute_snr(noise_scheduler, loss_timesteps)
                         base_weight = (
                             torch.stack(
@@ -1681,7 +1753,8 @@ class TrainJob(BaseJob):
 
                     profiler.tic("optimizer")
                     optimizer.step()
-                    lr_scheduler.step()
+                    if not self._is_schedulefree_optimizer():
+                        lr_scheduler.step()
                     optimizer.zero_grad()
                     profiler.toc("optimizer")
 
@@ -1706,7 +1779,7 @@ class TrainJob(BaseJob):
                 if loss_callback:
                     loss_callback.set_loss(ema_loss)
 
-                logs = {"loss": ema_loss, "lr": lr_scheduler.get_last_lr()[0]}
+                logs = {"loss": ema_loss, "lr": self._get_logged_lr(optimizer, lr_scheduler)}
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
@@ -1723,13 +1796,15 @@ class TrainJob(BaseJob):
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("_")[-1]))
 
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                            # before we save the new checkpoint, we need to have at _most_
+                            # `checkpoints_total_limit - 1` checkpoints
                             if len(checkpoints) >= self._checkpoints_total_limit:
                                 num_to_remove = len(checkpoints) - self._checkpoints_total_limit + 1
                                 removing_checkpoints = checkpoints[0:num_to_remove]
 
                                 print(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                                    f"{len(checkpoints)} checkpoints already exist, "
+                                    f"removing {len(removing_checkpoints)} checkpoints"
                                 )
                                 print(f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
@@ -1743,8 +1818,12 @@ class TrainJob(BaseJob):
                             self._experiment_folder,
                             f"checkpoint_{self._name}_{self._version}_{global_step:010d}",
                         )
-                        accelerator.save_state(save_path)
-                        print(f"Saved state to {save_path}")
+                        self._optimizer_eval(optimizer)
+                        try:
+                            accelerator.save_state(save_path)
+                            print(f"Saved state to {save_path}")
+                        finally:
+                            self._optimizer_train(optimizer)
 
                     if (
                         last_sampled_step < global_step
@@ -1754,8 +1833,14 @@ class TrainJob(BaseJob):
                         and global_step % self._sample_every == 0
                     ):
                         last_sampled_step = global_step
-                        self._generate_samples(
-                            accelerator, global_step, vae, unet, text_encoder_1, text_encoder_2
+                        self._generate_samples_with_optimizer_eval(
+                            accelerator,
+                            global_step,
+                            vae,
+                            unet,
+                            text_encoder_1,
+                            text_encoder_2,
+                            optimizer,
                         )
 
                 profiler.step_end()
@@ -1769,6 +1854,7 @@ class TrainJob(BaseJob):
 
         # Save the lora layers
         accelerator.wait_for_everyone()
+        self._optimizer_eval(optimizer)
         if accelerator.is_main_process:
             unet = unwrap_model(unet)
             # A quantized (bitsandbytes) base model cannot be cast with `.to(dtype)`.
@@ -1801,9 +1887,38 @@ class TrainJob(BaseJob):
 
         accelerator.end_training()
 
+    def _is_schedulefree_optimizer(self) -> bool:
+        return self._optimizer_name in SCHEDULEFREE_OPTIMIZERS
+
+    def _optimizer_train(self, optimizer) -> None:
+        if self._is_schedulefree_optimizer() and hasattr(optimizer, "train"):
+            optimizer.train()
+
+    def _optimizer_eval(self, optimizer) -> None:
+        if self._is_schedulefree_optimizer() and hasattr(optimizer, "eval"):
+            optimizer.eval()
+
+    def _get_logged_lr(self, optimizer, lr_scheduler) -> float:
+        if self._is_schedulefree_optimizer():
+            param_groups = getattr(optimizer, "param_groups", None)
+            if param_groups and "scheduled_lr" in param_groups[0]:
+                return param_groups[0]["scheduled_lr"]
+        return lr_scheduler.get_last_lr()[0]
+
+    def _generate_samples_with_optimizer_eval(
+        self, accelerator, global_step, vae, unet, text_encoder_one, text_encoder_two, optimizer
+    ):
+        self._optimizer_eval(optimizer)
+        try:
+            self._generate_samples(
+                accelerator, global_step, vae, unet, text_encoder_one, text_encoder_two
+            )
+        finally:
+            self._optimizer_train(optimizer)
+
     def set_to_train(self, accelerator, text_encoder_1, text_encoder_2, unet, optimizer):
         unet.train()
-        optimizer.train()
+        self._optimizer_train(optimizer)
         if self._train_text_encoder:
             text_encoder_1.train()
             text_encoder_2.train()

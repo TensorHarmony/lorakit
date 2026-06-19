@@ -3,7 +3,7 @@ from pathlib import Path
 
 import yaml
 
-from lorakit.config import get_config
+from lorakit.config import get_config, resolve_user_path
 
 
 def save_config(config, output_path):
@@ -28,7 +28,7 @@ def save_config(config, output_path):
 
 
 def get_job(config_path: str | dict | OrderedDict):
-    config = get_config(config_path)
+    config, config_file = get_config(config_path)
     if not config["job"]:
         raise ValueError("config file is invalid. Missing 'job' key")
 
@@ -47,10 +47,33 @@ def get_job(config_path: str | dict | OrderedDict):
         output_folder = config.get("output_folder", None)
         if not output_folder:
             raise ValueError("config file is invalid. Missing 'output_folder' key")
-        train_job = TrainJob(config["config"], version, name, output_folder)
+        output_folder = resolve_user_path(output_folder, config_path=config_file)
+        train_job = TrainJob(
+            config["config"], version, name, str(output_folder), config_path=config_file
+        )
 
         # save config as yaml file in the experiment folder
         save_config(config, train_job._experiment_folder / "config.yaml")
         return train_job
+    if job == "sample":
+        from lorakit.sample import SampleJob
+
+        if "config" not in config:
+            raise ValueError("config file is invalid. Missing 'config' key")
+        version = config.get("version", None)
+        if not version:
+            raise ValueError("config file is invalid. Missing 'version' key")
+        name = config.get("name", None)
+        if not name:
+            raise ValueError("config file is invalid. Missing 'name' key")
+        output_folder = config.get("output_folder", None)
+        if not output_folder:
+            raise ValueError("config file is invalid. Missing 'output_folder' key")
+        output_folder = resolve_user_path(output_folder, config_path=config_file)
+        sample_job = SampleJob(
+            config["config"], version, name, str(output_folder), config_path=config_file
+        )
+        save_config(config, sample_job._experiment_folder / "config.yaml")
+        return sample_job
     else:
         raise ValueError(f"job {job} is not supported")

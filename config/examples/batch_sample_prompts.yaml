@@ -1,0 +1,30 @@
+---
+# Batch inference from a JSON prompt file (id/pos/neg/seed entries).
+# Run from the sdxl-perturbation-probing repo root so relative paths resolve:
+#   uv run --directory external/lorakit lorakit config/examples/batch_sample_prompts.yaml
+#
+# Or copy this file and adjust prompt_file / lora_weights to absolute paths.
+job: sample
+version: "1.0"
+name: "prompt_batch"
+output_folder: "output"
+config:
+  device: "cuda:0"
+  allow_tf32: true
+  dtype: bf16
+  model:
+    name_or_path: "stabilityai/stable-diffusion-xl-base-1.0"
+  sample:
+    # JSON array of {"id", "pos", "neg", "seed"} — same format as perturbation-probe.
+    prompt_file: "../../data/prompts-20260609-152102.json"
+    num_prompts: 32
+    # Which prompts to pick from the file. Each image uses that row's "seed".
+    sampling_seed: 42
+    guidance_scale: 7
+    sample_steps: 20
+    resolution: 1024
+    # Training output folder or path to pytorch_lora_weights.safetensors.
+    # Set to null to run base model only.
+    lora_weights: null
+    # When lora_weights is set, also generate base-model images for comparison.
+    compare_base: true

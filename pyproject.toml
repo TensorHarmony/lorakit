@@ -26,6 +26,8 @@ dependencies = [
     "triton-windows; platform_system == 'Windows'",
     "prodigyopt>=1.1.2",
     "schedulefree>=1.4.1",
+    "vulture>=2.16",
+    "ruff>=0.15.15",
 ]
 
 [dependency-groups]

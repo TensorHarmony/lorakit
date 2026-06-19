@@ -30,7 +30,7 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from torch import Tensor
@@ -91,7 +91,7 @@ class AnchoredAdamW(Optimizer):
             group.setdefault("amsgrad", False)
 
     @torch.no_grad()
-    def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -251,7 +251,7 @@ class AnchoredAdamWScheduleFree(Optimizer):
                 group["train_mode"] = True
 
     @torch.no_grad()
-    def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
         if not self.param_groups[0]["train_mode"]:
             raise RuntimeError(
                 "Optimizer was not in train mode when step is called. Please "

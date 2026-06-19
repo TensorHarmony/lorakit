@@ -460,11 +460,13 @@ dependencies = [
     { name = "peft" },
     { name = "prodigyopt" },
     { name = "pyyaml" },
+    { name = "ruff" },
     { name = "schedulefree" },
     { name = "torch" },
     { name = "torchvision" },
     { name = "transformers" },
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
+    { name = "vulture" },
 ]
 
 [package.dev-dependencies]
@@ -481,11 +483,13 @@ requires-dist = [
     { name = "peft" },
     { name = "prodigyopt", specifier = ">=1.1.2" },
     { name = "pyyaml" },
+    { name = "ruff", specifier = ">=0.15.15" },
     { name = "schedulefree", specifier = ">=1.4.1" },
     { name = "torch", index = "https://download.pytorch.org/whl/cu126" },
     { name = "torchvision", index = "https://download.pytorch.org/whl/cu126" },
     { name = "transformers" },
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
+    { name = "vulture", specifier = ">=2.16" },
 ]
 
 [package.metadata.requires-dev]
