@@ -1,0 +1,85 @@
+---
+# 4-bit QLoRA SDXL LoRA config for 8 GB GPUs (RTX 5060 Ti, RTX 4060 Ti, etc.)
+# Uses NF4 quantization, gradient checkpointing, 8-bit AdamW, and 768 px resolution
+# to fit training into 8 GB of VRAM.
+#
+# Copy this file, then set name, instant_prompt, class_prompt, and dataset_folder.
+job: train
+version: "1.0"
+name: "my_model_name"
+output_folder: "output"
+config:
+  logging_folder: "logs"
+  device: "cuda:0"
+  allow_tf32: true
+  matmul_precision: "high"
+  cudnn_benchmark: true
+  instant_prompt: "SKS"
+  class_prompt: "man"
+  train:
+    dataset_folder: "/path/to/images/folder"
+    #caption_extension: ".txt"  # uncomment to use per-image .txt sidecar captions
+    #resume_from_checkpoint: "latest"
+    batch_size: 1
+    max_train_steps: 2000
+    save_every: 250
+    checkpoints_total_limit: 3
+    max_grad_norm: 1.0
+    gradient_accumulation_steps: 1
+    seed: 42
+    dtype: bf16
+    gradient_checkpointing: true    # critical: saves ~30% VRAM
+    cache_latents: true             # encode images once, skip per-step VAE
+    train_text_encoder: false       # text encoders add ~2 GB
+    resolution: 768                 # 1024 OOMs on 8 GB; 768 still produces good quality
+    num_workers: 2
+    loss_decay: 0.995
+    disable_sampling: true          # sampling loads fp32 VAE, OOM risk on 8 GB
+    optimizer: "adamw8bit"          # 8-bit states save ~1 GB vs full AdamW
+    optimizer_params:
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.02
+      eps: 0.00000001
+    lora:
+      use_dora: false
+      init_lora_weights: "gaussian"
+      target_modules:
+        "to_k": [4, 4]
+        "to_q": [4, 4]
+        "to_v": [4, 4]
+        "to_out.0": [4, 4]
+    text_encoder_lora:
+      use_dora: false
+      init_lora_weights: "gaussian"
+      target_modules:
+        "q_proj": [4, 4]
+        "k_proj": [4, 4]
+        "v_proj": [4, 4]
+        "out_proj": [4, 4]
+    lr_scheduler: "constant"
+    lr_scheduler_params:
+      num_warmup_steps: 0
+      num_training_steps: 2000
+      num_cycles: 1
+      power: 1
+  model:
+    name_or_path: "stabilityai/stable-diffusion-xl-base-1.0"
+    quantization:
+      bits: 4                        # NF4 QLoRA: ~2 GB UNet vs ~7 GB fp16
+      quantize_text_encoder: false
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+  # Sampling is disabled above; to enable preview images:
+  # 1. Set disable_sampling: false
+  # 2. Uncomment the block below and set your prompts
+  #sample:
+  #  sample_every: 250
+  #  prompts:
+  #    - "SKS man, portrait"
+  #  neg:
+  #    - "low quality, blurry"
+  #  seed: 42
+  #  walk_seed: true
+  #  guidance_scale: 7
+  #  sample_steps: 20

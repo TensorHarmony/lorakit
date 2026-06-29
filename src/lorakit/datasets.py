@@ -27,6 +27,7 @@ class DreamBoothDataset(Dataset):
         repeats=1,
         center_crop=False,
         random_flip=False,
+        caption_extension=None,
     ):
         self.resolution = resolution
         self.center_crop = center_crop
@@ -71,11 +72,29 @@ class DreamBoothDataset(Dataset):
                 )
             )
         instance_images = [Image.open(path) for path in image_paths]
+
         self.custom_instance_prompts = None
+        if caption_extension:
+            captions = []
+            for img_path in image_paths:
+                cap_path = img_path.with_suffix(caption_extension)
+                if cap_path.exists():
+                    content = cap_path.read_text(encoding="utf-8").strip()
+                    captions.append(content if content else None)
+                else:
+                    captions.append(None)
+            if any(captions):
+                self.custom_instance_prompts = captions
 
         self.instance_images = []
         for img in instance_images:
             self.instance_images.extend(itertools.repeat(img, repeats))
+
+        if self.custom_instance_prompts:
+            repeated = []
+            for cap in self.custom_instance_prompts:
+                repeated.extend([cap] * repeats)
+            self.custom_instance_prompts = repeated
 
         # image processing to prepare for using SD-XL micro-conditioning
         self.original_sizes = []

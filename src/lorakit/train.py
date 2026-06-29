@@ -256,6 +256,19 @@ class TrainJob(BaseJob):
 
         print(f"Using device: {self._device}")
 
+        if torch.cuda.is_available() and self._device != "cpu":
+            device_idx = int(self._device.split(":")[-1]) if ":" in self._device else 0
+            cc = torch.cuda.get_device_capability(device_idx)
+            cc_str = f"sm_{cc[0]}{cc[1]}"
+            if cc_str not in torch.cuda.get_arch_list():
+                raise RuntimeError(
+                    f"\nGPU {torch.cuda.get_device_name(device_idx)} "
+                    f"(compute capability {cc_str}) is not supported by this PyTorch build.\n"
+                    f"Supported architectures: {' '.join(torch.cuda.get_arch_list())}\n"
+                    f"Install a PyTorch build that includes {cc_str} support, e.g.:\n"
+                    f"  pip install torch --index-url https://download.pytorch.org/whl/cu130\n"
+                )
+
         self._allow_tf32 = config.get("allow_tf32", False)
 
         if self._allow_tf32:
@@ -469,6 +482,8 @@ class TrainJob(BaseJob):
                 dataset_folder, config_path=self._config_path, must_exist=True
             )
         )
+
+        self._caption_extension = self._train_config.get("caption_extension", None)
 
         self._num_workers = self._train_config.get("num_workers", 1)
         if self._num_workers > 1:
@@ -1269,6 +1284,7 @@ class TrainJob(BaseJob):
             class_data_root=self._class_data_folder if self._with_prior_preservation else None,
             class_num=self._num_class_images,
             resolution=self._resolution,
+            caption_extension=self._caption_extension,
         )
         # `persistent_workers` avoids respawning the worker processes (and re-running
         # the dataset's expensive __init__ image preprocessing) on every epoch, which
