@@ -57,7 +57,20 @@ D:/datasets/my_subject/
 └── ...
 ```
 
-Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`. Images are auto-resized and cropped to the training `resolution` (default 1024). No captions or subfolders needed.
+Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`. Images are auto-resized and cropped to the training `resolution` (default 1024).
+
+**Captions (optional).** To train with per-image captions instead of a single trigger token for all images (e.g. for tag-based character LoRAs), place a `.txt` file alongside each image with the same stem:
+
+```
+D:/datasets/my_subject/
+├── img01.jpg
+├── img01.txt    # "1girl, purple hair, blue eyes, smiling, outdoors"
+├── img02.png
+├── img02.txt    # "1girl, purple hair, blue eyes, sitting, glasses"
+└── ...
+```
+
+Then set `caption_extension: ".txt"` (next to `dataset_folder`) in your config. When sidecar files are present, each image is trained with its own caption — great for Illustrious-style LoRAs — instead of a single DreamBooth trigger token.
 
 **2. Copy and edit a config.** Pick one of the [example configs](#choosing-a-config), copy it out of `config/examples/`, and change at least:
 
@@ -97,6 +110,7 @@ All examples live in `config/examples/`. Copy one into `config/` and edit it.
 | `train_lora_sdxl_24gb_4090_4bit_1.0.yaml` | 24 GB | Fast | 4-bit QLoRA base. Lower VRAM, slightly slower than bf16. |
 | `train_lora_sdxl_24gb_4090_1.0.yaml` | 24 GB | — | Fully-commented reference of every option. |
 | `train_lora_sdxl_16gb_t4_1.0.yaml` | 16 GB | — | Low-VRAM (e.g. T4) using 4-bit quantization. |
+| `train_lora_sdxl_8gb_1.0.yaml` | 8 GB | — | 4-bit QLoRA + 768 px + 8-bit AdamW. For RTX 5060 Ti, 4060 Ti, etc. |
 
 Not sure? On a 24 GB card use the **bf16 metal** config. On 16 GB, use the **T4** config.
 
@@ -216,6 +230,7 @@ Ready-made profiling configs live in `config/examples/profile_4bit.yaml` and `co
 - **Out of memory** — set `gradient_checkpointing: true`, switch to a 4-bit config, or lower `resolution`.
 - **`Cannot find a working triton installation`** — run `uv sync` (Triton is a declared dependency); avoid running with a stale/hand-modified environment. `torch.compile` requires it.
 - **Quantization import errors** — run `uv sync` to (re)install `bitsandbytes`.
+- **`no kernel image is available for execution on the device` / unsupported compute capability** — your GPU (e.g. RTX 5060 Ti, Blackwell architecture) requires a PyTorch build with CUDA 13.0+ support. lorakit checks this at startup and prints the fix. In short: install a newer PyTorch wheel (`uv pip install torch --index-url https://download.pytorch.org/whl/cu130`), then reinstall `bitsandbytes` from the same session so its kernels are compiled for your GPU.
 
 ---
 
